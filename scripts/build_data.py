@@ -45,9 +45,9 @@ args = ap.parse_args()
 (ROOT / "data/processed").mkdir(parents=True, exist_ok=True)
 
 deals = pd.concat([load_rent(p) for p in args.rent], ignore_index=True)
-model, mae = train(deals)
+model, mae, band = train(deals)
 period = f"{deals.contract_ym.min()}~{deals.contract_ym.max()}"
-joblib.dump({"model": model, "mae": mae, "period": period, "latest_ym": int(deals.contract_ym.max())},ROOT / "models/price.joblib")
+joblib.dump({"model": model, "mae": mae, "band": band, "period": period, "latest_ym": int(deals.contract_ym.max())},ROOT / "models/price.joblib")
 print(f"월세 모델: 거래 {len(deals):,}건 ({period}), 검증 MAE {mae:.1f}만원")
 
 graph = load_seoul_metro(args.dist, args.transfer)

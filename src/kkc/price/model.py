@@ -89,8 +89,27 @@ def _prep(df: pd.DataFrame) -> pd.DataFrame:
     return X
 
 
+def error_band(df: pd.DataFrame, residual: pd.Series, lo: float = 0.1, hi: float = 0.9) -> dict:
+    """검증 오차(실제 - 예측)의 하위·상위 분위수를 계약(월세/전세)×방(원룸/투룸)별로. 키 "월세 원룸" 등 + "전체".
+    오차 크기가 방마다 크게 달라서(원룸 MAE ≈10만, 투룸 ≈18만) 하나의 기준으로 '싸다/비싸다'를 정하면 안 된다."""
+    q = lambda s: (round(float(s.quantile(lo)), 1), round(float(s.quantile(hi)), 1))  # noqa: E731
+    res = pd.Series(residual.values, index=df.index)
+    kind = df.rent.gt(0).map({True: "월세", False: "전세"})
+    room = pd.cut(df.area_m2, ROOM_BINS, labels=list(ROOMS))
+    band = {f"{k} {r}": q(s) for (k, r), s in res.groupby([kind, room], observed=True)}
+    band["전체"] = q(res)
+    return band
+
+
+def band_for(band: dict, rent: float, area_m2: float, fallback: float = 0.0) -> tuple[float, float]:
+    """매물에 맞는 오차 범위. 방 구분 밖(66㎡ 초과)이면 '전체', 밴드가 없는 예전 빌드면 ±fallback(MAE)."""
+    room = next((r for r, top in zip(ROOMS, ROOM_BINS[1:]) if area_m2 <= top), None)
+    key = f"{'월세' if rent > 0 else '전세'} {room}"
+    return tuple(band.get(key) or band.get("전체") or (-fallback, fallback))
+
+
 def train(df: pd.DataFrame, seed: int = 42):
-    """df: FEATURES + deposit, rent 컬럼. 반환: (model, 검증 MAE[만원]).
+    """df: FEATURES + deposit, rent 컬럼. 반환: (model, 검증 MAE[만원], 오차 범위 error_band).
     검증 = 계약월이 가장 최근인 20% (앱은 '지금 시세'를 묻기 때문. 무작위 분할은 같은 건물 반복 계약이
     양쪽에 들어가 MAE가 부풀려짐). 검증 후 전체 데이터로 다시 학습해서 반환."""
     df = df.sort_values("contract_ym", kind="stable")
@@ -103,8 +122,10 @@ def train(df: pd.DataFrame, seed: int = 42):
     # 서울시 전월세가 64만 건, 최근 3개월 검증: 기본 설정 MAE 16.9 → 이 설정 15.8만원 (2026-11-18 실험)
     model = HistGradientBoostingRegressor(categorical_features="from_dtype", random_state=seed,
                                           max_iter=2000, max_leaf_nodes=127)
-    mae = mean_absolute_error(y.iloc[cut:], model.fit(X.iloc[:cut], y.iloc[:cut]).predict(X.iloc[cut:]))
-    return model.fit(X, y), mae
+    pred = model.fit(X.iloc[:cut], y.iloc[:cut]).predict(X.iloc[cut:])
+    mae = mean_absolute_error(y.iloc[cut:], pred)
+    band = error_band(df.iloc[cut:], y.iloc[cut:] - pred)
+    return model.fit(X, y), mae, band
 
 
 def price_gap(model, listing: pd.DataFrame) -> pd.Series:

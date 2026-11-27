@@ -5,7 +5,6 @@
   "3": "test_pipeline.py",
   "4": "pandas",
   "5": "KKC · AI 자취방 추천 서비스 — Claude 작업 규칙",
-  "6": "unsplash_listings.py",
   "7": ".claude/CLAUDE.md",
   "8": "install-plugins.sh script",
   "9": "install-plugins.ps1",
@@ -16,9 +15,8 @@
   "14": "vision/__init__.py",
   "15": "streamlit_app.py",
   "16": "ui.py",
-  "17": "read_table",
+  "17": "test_core.py",
   "18": "DataFrame",
   "19": "Series",
-  "20": "build_data.py",
-  "21": "KKC · AI 자취방 추천 서비스"
+  "20": "build_data.py"
 }

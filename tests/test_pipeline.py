@@ -47,7 +47,7 @@ def _fake_rents(n=400):
 
 def test_region_rents_orders_by_price():
     df = _fake_rents()
-    model, mae = train(df)
+    model, mae, _ = train(df)
     assert mae < 5
     r = region_rents(model, df, area_m2=20)
     assert r["강남구"] > r["관악구"] + 30
@@ -61,7 +61,7 @@ def test_region_rents_same_btype_for_all_regions():
     df["btype"] = "단독다가구"
     df.loc[gangnam[:150], "btype"] = "오피스텔"  # 강남구 최빈 = 오피스텔, 전체 최빈 = 단독다가구
     df["rent"] = df.rent + (df.btype == "오피스텔") * 40
-    model, _ = train(df)
+    model, _, _ = train(df)
     r = region_rents(model, df, area_m2=20)
     assert r["강남구"] - r["관악구"] < 55  # 강남 최빈(오피스텔)로 예측했다면 +40이 더 붙음
 
@@ -172,3 +172,16 @@ def test_region_deal_stats():
     by_dong = region_deal_stats(df.assign(dong=["신림동", "봉천동", "신림동", "신림동", "신림동", "역삼동"]),
                                 by=("gu", "dong"))
     assert by_dong.loc[("관악구", "신림동", "원룸", "월세"), "deals"] == 1  # 봉천동 거래는 따로
+
+
+def test_error_band_by_kind_and_room():
+    from kkc.price.model import band_for, error_band
+    df = pd.DataFrame({"area_m2": [20] * 10 + [50] * 10 + [20] * 10, "rent": [50] * 20 + [0] * 10})
+    res = pd.Series(list(range(-5, 5)) + list(range(-50, 50, 10)) + [0] * 10, dtype=float)
+    band = error_band(df, res)
+    assert band["월세 원룸"][0] < 0 < band["월세 원룸"][1] and band["월세 원룸"][1] < 6
+    assert band["월세 투룸"][1] > 20  # 투룸은 오차가 더 크다
+    assert band_for(band, rent=50, area_m2=20) == band["월세 원룸"]
+    assert band_for(band, rent=0, area_m2=20) == band["전세 원룸"]
+    assert band_for(band, rent=50, area_m2=100) == band["전체"]  # 66㎡ 넘으면 전체 기준
+    assert band_for({}, rent=50, area_m2=20, fallback=15.2) == (-15.2, 15.2)  # 예전 빌드(밴드 없음)는 ±MAE

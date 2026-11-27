@@ -67,3 +67,12 @@ def train_ltr(X: pd.DataFrame, y: pd.Series, group_sizes: list[int]):
     model = lgb.LGBMRanker(objective="lambdarank", n_estimators=200)
     model.fit(X, y, group=group_sizes)
     return model
+
+
+def commute_relax(df: pd.DataFrame, max_commute: float, steps=(10, 20, 30)) -> dict | None:
+    """통학 조건 때문에 결과가 0곳일 때: 통학 한도를 가장 적게 늘려서 나오는 경우. df는 예산 안 지역만."""
+    for m in steps:
+        n = int((df.commute_min <= max_commute + m).sum())
+        if n:
+            return {"extra_minutes": m, "count": n}
+    return None

@@ -104,3 +104,12 @@ def test_add_osm_routes_matches_parenthesized_name():
     coords = pd.DataFrame({"lat": [37.5133, 37.5056], "lon": [127.1001, 127.1069]}, index=["잠실", "석촌"])
     coords = add_osm_routes(g, coords, {"8": [[["잠실(송파구청)", 37.5160, 127.1030], ["석촌", 37.5056, 127.1069]]]})
     assert "잠실(송파구청)" not in coords.index  # 400m 떨어져 있어도 괄호 뗀 이름이 같으면 같은 역
+
+
+def test_commute_relax_finds_smallest_extra():
+    from kkc.ranking.rank import commute_relax
+    df = pd.DataFrame({"region": ["A", "B", "C"], "commute_min": [38, 41, 55]})
+    assert commute_relax(df, max_commute=30) == {"extra_minutes": 10, "count": 1}  # 40분이면 A
+    assert commute_relax(df, max_commute=35, steps=(5, 10)) == {"extra_minutes": 5, "count": 1}
+    assert commute_relax(df, max_commute=5) is None  # 30분 늘려도 35분 < 38분
+    assert commute_relax(df.iloc[:0], max_commute=30) is None

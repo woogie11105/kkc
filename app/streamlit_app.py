@@ -27,9 +27,9 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from kkc.commute.subway import nearest_station_by_walk, region_commute  # noqa: E402
-from kkc.price.model import BTYPES, ROOMS, converted_rent, price_gap  # noqa: E402
-from kkc.ranking.rank import score_regions  # noqa: E402
-from kkc.ui import gap_label, pick_photo  # noqa: E402
+from kkc.price.model import BTYPES, ROOMS, band_for, converted_rent, price_gap  # noqa: E402
+from kkc.ranking.rank import commute_relax, score_regions, tradeoff_suggestions  # noqa: E402
+from kkc.ui import SORTS, gap_label, pick_photo, sort_regions, tradeoff_lines  # noqa: E402
 from kkc.vision.fov import (STD_FOV_DEG, crop_ratio, load_fov_model, predict_fov,  # noqa: E402
                             restore_standard_view, wide_angle_flag)
 
@@ -58,12 +58,12 @@ BLUE = "#326CF9"
 LINE_COLOR = {"1": "#0052A4", "2": "#00A84D", "3": "#EF7C1C", "4": "#00A5DE",  # 서울 지하철 호선 표준색
               "5": "#996CAC", "6": "#CD7C2F", "7": "#747F00", "8": "#E6186C", "9": "#BDB092"}
 SUBWAY_MAP = ROOT / "data/processed/subway_map.json"  # scripts/fetch_subway_map.py (OSM 실제 선로 + 역 이름)
-FILTER_KEYS = ["level", "kind", "room", "dep_m", "rent_원룸", "rent_투룸", "dep_j_원룸", "dep_j_투룸", "commute", "w", "order",
+FILTER_KEYS = ["level", "kind", "room", "dep_m", "rent_원룸", "rent_투룸", "dep_j_원룸", "dep_j_투룸", "commute", "w",
                "order2", "pick3"]
 
 st.set_page_config(page_title="KKC 자취방 추천", page_icon="🏠", layout="wide")
 ss = st.session_state
-for k in FILTER_KEYS:  # 화면을 옮겨도 필터 값이 사라지지 않게 (그리지 않은 위젯 값은 Streamlit이 지운다)
+for k in FILTER_KEYS + [k for k in ss if k.startswith(("sort_", "desc_"))]:  # 화면을 옮겨도 필터 값이 사라지지 않게 (그리지 않은 위젯 값은 Streamlit이 지운다)
     if k in ss:
         ss[k] = ss[k]
 ss.setdefault("page", PAGES[0])
@@ -99,7 +99,8 @@ header[data-testid="stHeader"], [data-testid="stToolbar"] {{ display: none; }}
 .st-key-hd > :nth-child(3) {{ margin-left: auto; }}
 .st-key-search [data-testid="stTextInputRootElement"], .st-key-search [data-testid="stTextInputRootElement"] * {{
   background: transparent !important; border: none !important; box-shadow: none !important; }}
-.db-login {{ font-size: 14px; color: #888; margin-left: 40px; white-space: nowrap; }}
+.db-ico {{ font-size: 14px; opacity: .55; }}
+.st-key-search input {{ min-width: 150px; }}
 /* 왼쪽 레일 */
 .st-key-rail {{ width: 80px; min-height: calc(100vh - 80px); border-right: 1px solid #E1E1E1; padding-top: 12px; }}
 .st-key-rail [role="radiogroup"] {{ flex-direction: column !important; gap: 6px; align-items: center; }}
@@ -132,11 +133,12 @@ header[data-testid="stHeader"], [data-testid="stToolbar"] {{ display: none; }}
 .db-pl {{ font-size: 14px; border-radius: 18px; padding: 7px 15px; border: 1px solid #DADADA; color: #656565; background: #fff; }}
 .db-pl.on {{ background: #222; color: #fff; border-color: #222; font-weight: 700; }}
 .st-key-sort, .st-key-sort2 {{ padding: 16px 16px 8px; }}
-.st-key-sort button, .st-key-sort2 button {{ border-radius: 18px !important; min-height: 34px; padding: 0 15px; border: 1px solid #DADADA; }}
-.st-key-sort button p, .st-key-sort2 button p {{ font-size: 14px !important; color: #656565; }}
-.st-key-sort button[aria-checked="true"], .st-key-sort2 button[aria-checked="true"] {{ background: #222 !important; border-color: #222 !important; }}
-.st-key-sort button[aria-checked="true"] p, .st-key-sort2 button[aria-checked="true"] p {{ color: #fff !important; font-weight: 700; }}
-.st-key-sort [data-testid="stButtonGroup"] > div, .st-key-sort2 [data-testid="stButtonGroup"] > div {{ gap: 6px; }}
+.st-key-sortdir {{ padding: 0 16px 8px; }}
+.st-key-sort button, .st-key-sortdir button, .st-key-sort2 button {{ border-radius: 18px !important; min-height: 34px; padding: 0 15px; border: 1px solid #DADADA; }}
+.st-key-sort button p, .st-key-sortdir button p, .st-key-sort2 button p {{ font-size: 14px !important; color: #656565; }}
+.st-key-sort button[aria-checked="true"], .st-key-sortdir button[aria-checked="true"], .st-key-sort2 button[aria-checked="true"] {{ background: #222 !important; border-color: #222 !important; }}
+.st-key-sort button[aria-checked="true"] p, .st-key-sortdir button[aria-checked="true"] p, .st-key-sort2 button[aria-checked="true"] p {{ color: #fff !important; font-weight: 700; }}
+.st-key-sort [data-testid="stButtonGroup"] > div, .st-key-sortdir [data-testid="stButtonGroup"] > div, .st-key-sort2 [data-testid="stButtonGroup"] > div {{ gap: 6px; }}
 .db-it {{ display: flex; gap: 16px; padding: 16px; border-bottom: 1px solid #EEE; }}
 .db-sq {{ width: 140px; height: 140px; flex: none; border-radius: 4px; background: #F0F5FF; color: {BLUE}; display: flex;
   flex-direction: column; align-items: center; justify-content: center; font-weight: 800; font-size: 34px; line-height: 1.15; }}
@@ -153,6 +155,10 @@ header[data-testid="stHeader"], [data-testid="stToolbar"] {{ display: none; }}
   padding: 3px 7px; border-radius: 3px; }}
 .db-tg.good {{ color: #12A150; background: #EAF7EF; }} .db-tg.bad {{ color: #E42939; background: #FFF0F0; }}
 .db-tg.neutral {{ color: #656565; background: #F3F3F3; }} .db-tg.warn {{ color: #B26A00; background: #FFF4DB; }}
+.db-sortby {{ font-size: 13px; color: #656565; padding: 0 16px 6px; }}
+.db-sortby b {{ color: #222; }}
+.db-tip {{ font-size: 13px; color: #333; background: #F1F6FF; border-radius: 8px; padding: 10px 14px; margin: 8px 12px; line-height: 1.6; }}
+.db-tip small {{ color: #979797; }}
 .db-note {{ font-size: 12px; color: #979797; line-height: 1.6; padding: 14px 16px; }}
 /* 사진 화각 팝업 */
 .st-key-dim {{ background: rgba(0,0,0,.45); min-height: calc(100vh - 80px); padding: 32px 110px; }}
@@ -389,15 +395,16 @@ price, subway, fov_model, transit = load()
 ready = REGIONS.exists() and STATIONS.exists() and DEALS.exists() and subway
 ss.rail_pg = ss.nav_pg = ss.page
 
-# ── 헤더: 로고 · 검색(+ 가까운 역) · 내비 · 로그인 ──
+# ── 헤더: 로고 · 검색(+ 가까운 역) · 내비 ──
 with st.container(key="hd", horizontal=True):
     st.html('<div class="db-logo">kkc</div>')
     with st.container(key="search", horizontal=True):
-        place = st.text_input("직장·학교", value="경희대학교", label_visibility="collapsed", key="place")
+        st.html('<span class="db-ico">🔍</span>')
+        place = st.text_input("직장·학교", value="경희대학교", label_visibility="collapsed", key="place",
+                              placeholder="직장·학교 입력 후 Enter")
         hint = st.empty()
     with st.container(key="nav"):
         st.segmented_control("화면", PAGES, key="nav_pg", on_change=sync_from_nav, label_visibility="collapsed")
-    st.html('<div class="db-login">로그인 · 회원가입</div>')
 
 rail_col, body = st.columns([1, 17], gap=None)
 with rail_col, st.container(key="rail"):
@@ -512,6 +519,9 @@ if by_dong:  # 동 단위: 동 위치 → 가까운 역(도보) → 지하철 �
     dstats = pd.read_csv(DEALS_DONG).query("room == @room and kind == @kind and deals >= @MIN_DEALS")
     dongs = dongs.dropna(subset=["commute_min"]).merge(dstats.drop(columns=["room", "kind"]), on=["gu", "dong"])
     regions, ranked = rank_view(dongs.assign(region=dongs.gu + " " + dongs.dong))
+in_budget = regions[(regions.deposit_med <= max_deposit) & (regions.rent_med <= max_rent)]
+tradeoffs = tradeoff_lines(tradeoff_suggestions(in_budget, budget=float("inf"), max_commute=max_commute))
+relax = commute_relax(in_budget, max_commute) if ranked.empty else None
 
 
 def svg_img(svg: str, cls: str = "", style: str = "") -> str:
@@ -588,27 +598,43 @@ SRC = ("보증금·월세: 서울특별시 전월세가 정보(서울 열린데�
        f"소상공인시장진흥공단 상가정보(2026-09, 동 위치 = 그 동 상가 좌표 중앙값). 동 단위는 최근 12개월 거래 {MIN_DEALS}건 "
        "이상인 동만. 위치 검색·지도: OpenStreetMap.")
 MODEL_NOTE = (f"AI 예측 시세: Gradient Boosting 환산월세 예측(계약 {price['period'].replace('~', '–')}, 최근 계약 20% 검증 "
-              f"MAE {price['mae']:.1f}만 원) · 참고 정보" if price else "가격 모델이 없어 시세 비교는 생략했어요.")
+              f"MAE {price['mae']:.1f}만 원) · 싼 편/비싼 편 = 같은 계약·방 종류 실제 계약의 예측 오차 하위·상위 10% 밖"
+              " · 참고 정보" if price else "가격 모델이 없어 시세 비교는 생략했어요.")
+
+
+def gap_tag(gap: float, li) -> tuple[str, str]:
+    """매물(li)의 계약·방 종류에 맞는 오차 범위로 시세 대비 배지. 예전 빌드(밴드 없음)는 ±MAE."""
+    return gap_label(gap, band_for(price.get("band", {}), li.rent, li.area_m2, price["mae"]))
 
 # ── 1. 동네 찾기 ──
 if page == "동네 찾기":
     col_list, col_map = body.columns([400, 960], gap=None)
     with col_list, st.container(key="list"):
+        keys = ["추천", "월세", "보증금", "거리"] if kind == "월세" else ["추천", "전세금", "거리"]
+        with st.container(key="sort"):  # 계약 종류마다 위젯 키를 따로 둬서 전세↔월세 전환 때 없는 항목이 남지 않게
+            sort_key = st.segmented_control("정렬 항목", keys, default="추천", key=f"sort_{kind}", required=True,
+                                            label_visibility="collapsed")
+        with st.container(key="sortdir"):
+            _, up, down = SORTS[sort_key]
+            desc = st.segmented_control("정렬 방향", [False, True], default=False, key=f"desc_{kind}_{sort_key}", required=True,
+                                        label_visibility="collapsed",
+                                        format_func=lambda d: f"↓ {down}" if d else f"↑ {up}")
         shown = ranked.assign(rank=ranked.index + 1)
-        if by_dong:
+        if by_dong:  # 동 단위는 추천 상위 안에서만 다시 정렬한다
             shown = shown.head(DONG_SHOWN)
-        with st.container(key="sort"):
-            order = st.segmented_control("정렬", ["추천순", "월세 낮은순", "가까운순"], default="추천순", key="order",
-                                         label_visibility="collapsed",
-                                         format_func=lambda o: f"추천 동네 {len(shown)}" if o == "추천순" else o) or "추천순"
-        if order == "월세 낮은순":  # 동 단위는 추천 상위 안에서만 다시 정렬한다
-            shown = shown.sort_values(["pred_rent", "commute_min"])
-        elif order == "가까운순":
-            shown = shown.sort_values(["commute_min", "pred_rent"])
+        shown, sort_label = sort_regions(shown, sort_key, desc)
+        st.html(f'<div class="db-sortby">추천 동네 {len(shown)}곳{f" (상위 {DONG_SHOWN}개 동)" if by_dong else ""}'
+                f' · 정렬 기준: <b>{sort_label}</b></div>')
+        if tradeoffs:
+            st.html('<div class="db-tip">💡 ' + "<br>💡 ".join(esc(t) for t in tradeoffs)
+                    + f'<br><small>{room} {kind} 실거래 중앙값의 환산월세 기준 · 가장 싼 동네끼리 비교</small></div>')
         if ranked.empty:
-            st.html('<div class="db-note">조건에 맞는 동네가 없어요. 위 필터에서 보증금·월세·통학 시간을 늘려 보세요.</div>')
+            st.html(f'<div class="db-tip">💡 통학 {relax["extra_minutes"]}분만 늘리면 {relax["count"]}곳이 나와요. '
+                    f'위 필터에서 통학을 {max_commute + relax["extra_minutes"]}분으로 바꿔 보세요.</div>' if relax else
+                    '<div class="db-note">조건에 맞는 동네가 없어요. 위 필터에서 보증금·월세·통학 시간을 늘려 보세요.</div>')
         with st.container(height=690, border=False):
-            st.html("".join(
+            if not shown.empty:  # st.html("")은 오류라 빈 목록이면 건너뜀
+                st.html("".join(
                 f'<div class="db-it"><div class="db-sq">'
                 + (f'{r.rent_med:.0f}<small>만 원/월</small>' if r.rent_med else f'{won(r.deposit_med)}<small>전세금</small>')
                 + '</div><div>'
@@ -661,7 +687,7 @@ elif page == "매물 비교":
     col_list, col_map = body.columns([400, 960], gap=None)
     with col_list, st.container(key="list"):
         with st.container(key="sort2"):
-            order = st.segmented_control("정렬", ["전체", "종합순", "싼 순"], default="전체", key="order2",
+            order = st.segmented_control("정렬", ["전체", "종합순", "싼 순"], default="전체", key="order2", required=True,
                                          label_visibility="collapsed",
                                          format_func=lambda o: f"내 후보 매물 {len(picked)}" if o == "전체" else o) or "전체"
         rows = picked.assign(rank=picked.index + 1) if not picked.empty else picked
@@ -673,7 +699,7 @@ elif page == "매물 비교":
             tags = f'<span class="db-tg">종합 {r["rank"]}위</span>'
             pred = ""
             if price:
-                text, tone = gap_label(r["시세 대비(만원)"])
+                text, tone = gap_tag(r["시세 대비(만원)"], li)
                 tags += f'<span class="db-tg {tone}">{text}</span>'
                 pred = (f'<div class="db-l2">AI 예측 {r.pred_rent - r["시세 대비(만원)"]:.1f}만 / '
                         f'환산 {r.pred_rent:.1f}만</div>')
@@ -735,7 +761,7 @@ else:
             li, r = info.loc[pick], picked.set_index("region").loc[pick]
             rows_html = ""
             if price:
-                text, tone = gap_label(r["시세 대비(만원)"])
+                text, tone = gap_tag(r["시세 대비(만원)"], li)
                 rows_html += (f'<tr><td>AI 예측 시세</td><td><b>{r.pred_rent - r["시세 대비(만원)"]:.1f}만</b> (환산 '
                               f'{r.pred_rent:.1f}만) <span class="db-tg {tone}">{text}</span></td></tr>')
             rows_html += (f'<tr><td>{esc(place.strip()) or "직장·학교"}까지</td><td>{r.commute_min:.0f}분</td></tr>'
