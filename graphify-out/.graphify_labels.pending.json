@@ -1,10 +1,11 @@
 {
   "0": "test_core.py",
   "1": "AI 자취방 추천 서비스 — 제안서 초안 (팀 KKC)",
-  "2": "SubwayGraph",
-  "3": "test_pipeline.py",
+  "2": "pandas",
+  "3": "SubwayGraph",
   "4": "pandas",
   "5": "KKC · AI 자취방 추천 서비스 — Claude 작업 규칙",
+  "6": "Image",
   "7": ".claude/CLAUDE.md",
   "8": "install-plugins.sh script",
   "9": "install-plugins.ps1",
@@ -18,5 +19,5 @@
   "17": "test_core.py",
   "18": "DataFrame",
   "19": "Series",
-  "20": "build_data.py"
+  "20": "unsplash_listings.py"
 }

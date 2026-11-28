@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kkc.commute.subway import SubwayGraph
-from kkc.commute.transit import TransitGraph, ride_minutes, wait_minutes
+from kkc.commute.transit import TransitGraph, legs, ride_minutes, route_lines, wait_minutes
 
 
 def small_city():
@@ -52,3 +52,47 @@ def test_subway_transfer_cannot_shortcut_through_bus_stop():
               ride_min={}, wait_min={})
     g.link_walks()
     assert g.times_to({("A", "2"): 0})[("A", "1")] == pytest.approx(4)  # 역 밖 정류장으로 나갔다 들어오는 게 더 싸면 안 된다
+
+
+def test_trip_follows_bus_and_legs_name_it():
+    g = small_city()
+    g.route_name, g.stop_name = {7: "273"}, {101: "A역 앞", 102: "B역 앞"}
+    egress = g.access(37.6009, 127.0)
+    nxt = {}
+    to_b = g.times_to(egress, nxt)
+    minutes, walk0, path = g.trip(37.50, 127.0, to_b, nxt=nxt)
+    assert minutes == pytest.approx(g.time_from(37.50, 127.0, to_b))
+    assert walk0 + to_b[path[0]] == pytest.approx(minutes)
+    assert path[-1] in egress
+    assert legs(path, g.route_name, g.stop_name) == ["273번 버스 A역 앞 → B역 앞 (1정거장)"]
+
+
+def test_subway_route_and_legs_drop_transfer_only_hops():
+    sub = SubwayGraph()
+    sub.add_segment("1", "A", "B", 5)
+    sub.add_segment("1", "B", "C", 5)
+    sub.add_segment("2", "B", "D", 5)
+    sub.add_transfer("B", "1", "2", 3)
+    path = sub.route("A", "D")
+    assert path[0][0] == "A" and path[-1] == ("D", "2")
+    assert legs(path) == ["1호선 A → B (1정거장)", "2호선 B → D (1정거장)"]
+    assert legs(sub.route("B", "D")) == ["2호선 B → D (1정거장)"]  # 출발역에서 갈아타는 건 구간이 아님
+    assert sub.route("A", "없는역") == []
+
+
+def test_route_lines_split_rides_and_walks():
+    g = small_city()
+    egress = g.access(37.6009, 127.0)
+    nxt = {}
+    to_b = g.times_to(egress, nxt)
+    _, _, path = g.trip(37.50, 127.0, to_b, nxt=nxt)
+    lines = route_lines(path, g.xy.get)
+    assert [ln["kind"] for ln in lines] == [("R", 7)]  # 정류장 앞에서 타고 내리는 거라 도보 구간은 길이 0 → 뺌
+    assert lines[0]["pts"] == [[37.5009, 127.0], [37.6009, 127.0]]
+    sub = SubwayGraph()
+    sub.add_segment("1", "A", "B", 5)
+    sub.add_segment("2", "B", "C", 5)
+    sub.add_transfer("B", "1", "2", 3)
+    xy = {"A": (0.0, 0.0), "B": (1.0, 0.0), "C": (1.0, 1.0)}
+    lines = route_lines(sub.route("A", "C"), lambda n: xy[n[0]])
+    assert [(ln["kind"], ln["pts"]) for ln in lines] == [(("M", "1"), [[0.0, 0.0], [1.0, 0.0]]), (("M", "2"), [[1.0, 0.0], [1.0, 1.0]])]

@@ -27,6 +27,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from kkc.commute.subway import nearest_station_by_walk, region_commute  # noqa: E402
+from kkc.commute.transit import legs, route_lines  # noqa: E402
 from kkc.price.model import BTYPES, ROOMS, band_for, converted_rent, price_gap  # noqa: E402
 from kkc.ranking.rank import commute_relax, score_regions, tradeoff_suggestions  # noqa: E402
 from kkc.ui import SORTS, gap_label, pick_photo, sort_regions, tradeoff_lines  # noqa: E402
@@ -57,6 +58,7 @@ PAGE_ICON = {"동네 찾기": ":material/home:", "매물 비교": ":material/vie
 BLUE = "#326CF9"
 LINE_COLOR = {"1": "#0052A4", "2": "#00A84D", "3": "#EF7C1C", "4": "#00A5DE",  # 서울 지하철 호선 표준색
               "5": "#996CAC", "6": "#CD7C2F", "7": "#747F00", "8": "#E6186C", "9": "#BDB092"}
+BUS_COLOR = "#3CB44A"  # 서울 지선버스 초록 (경로 그림의 버스 구간)
 SUBWAY_MAP = ROOT / "data/processed/subway_map.json"  # scripts/fetch_subway_map.py (OSM 실제 선로 + 역 이름)
 FILTER_KEYS = ["level", "kind", "room", "dep_m", "rent_원룸", "rent_투룸", "dep_j_원룸", "dep_j_투룸", "commute", "w",
                "order2", "pick3"]
@@ -155,6 +157,11 @@ header[data-testid="stHeader"], [data-testid="stToolbar"] {{ display: none; }}
   padding: 3px 7px; border-radius: 3px; }}
 .db-tg.good {{ color: #12A150; background: #EAF7EF; }} .db-tg.bad {{ color: #E42939; background: #FFF0F0; }}
 .db-tg.neutral {{ color: #656565; background: #F3F3F3; }} .db-tg.warn {{ color: #B26A00; background: #FFF4DB; }}
+details.db-go > summary {{ list-style: none; cursor: pointer; }} details.db-go > summary::-webkit-details-marker {{ display: none; }}
+details.db-go > summary:hover {{ background: #FAFBFF; }}
+.db-more {{ font-size: 12px; color: {BLUE}; margin-top: 6px; }} details[open] .db-more {{ display: none; }}
+.db-route {{ margin: -4px 16px 12px; padding: 10px 14px; background: #F7F9FF; border-radius: 6px; font-size: 13px;
+  color: #333; line-height: 1.9; border-bottom: 1px solid #EEE; }}
 .db-sortby {{ font-size: 13px; color: #656565; padding: 0 16px 6px; }}
 .db-sortby b {{ color: #222; }}
 .db-tip {{ font-size: 13px; color: #333; background: #F1F6FF; border-radius: 8px; padding: 10px 14px; margin: 8px 12px; line-height: 1.6; }}
@@ -237,22 +244,71 @@ def walk_station(lat: float, lon: float, coords: pd.DataFrame) -> tuple[str, flo
 
 
 @st.cache_data(show_spinner="버스+지하철 통학 시간 계산 중…")
-def bus_commute(lat: float, lon: float, station: str, walk: float, origins: pd.DataFrame) -> pd.Series:
-    """origins(lat, lon, station, walk_min) 각각에서 목적지까지 버스+지하철 최소 분. 버스 그래프가 없으면 NaN.
+def bus_commute(lat: float, lon: float, station: str, walk: float, origins: pd.DataFrame) -> pd.DataFrame:
+    """origins(lat, lon, station, walk_min) 각각에서 목적지까지 버스+지하철 최소 분(min)과 가는 길(walk0 출발 도보,
+    path 경로 노드, walk1 도착 도보). 버스 그래프가 없으면 NaN.
     목적지 쪽: 실제 걷는 길로 닿는 정류장·역 + 고른 통학역(도보 walk). 출발 쪽: 걸어서 닿는 정류장·역 + 그 동의 가까운 역."""
     if transit is None:
-        return pd.Series(float("nan"), index=origins.index)
+        return pd.DataFrame({"min": float("nan"), "walk0": float("nan"), "path": None, "walk1": float("nan")},
+                            index=origins.index)
     egress = transit.access(lat, lon, walk_m)
     egress.update({n: walk for n in subway.nodes_of(station)})
-    to = transit.times_to(egress)
-    return pd.Series([transit.time_from(o.lat, o.lon, to, {n: o.walk_min for n in subway.nodes_of(o.station)})
-                      for o in origins.itertuples()], index=origins.index)
+    nxt = {}
+    to = transit.times_to(egress, nxt)
+    rows = []
+    for o in origins.itertuples():
+        m, w0, path = transit.trip(o.lat, o.lon, to, {n: o.walk_min for n in subway.nodes_of(o.station)}, nxt)
+        rows.append((m, w0, path, egress.get(path[-1], float("nan")) if path else float("nan")))
+    return pd.DataFrame(rows, columns=["min", "walk0", "path", "walk1"], index=origins.index)
 
 
-def with_bus(df: pd.DataFrame, subway_min: pd.Series, mixed: pd.Series) -> pd.DataFrame:
-    """통학 = 지하철만 / 버스 섞기 중 빠른 쪽. bus = 버스를 타야 더 빠른 곳."""
-    return df.assign(commute_min=pd.concat([subway_min, mixed], axis=1).min(axis=1).round(),
-                     bus=(mixed < subway_min - 0.5).fillna(False))
+def with_bus(df: pd.DataFrame, subway_min: pd.Series, mixed: pd.DataFrame) -> pd.DataFrame:
+    """통학 = 지하철만 / 버스 섞기 중 빠른 쪽. bus = 버스를 타야 더 빠른 곳 (그때 가는 길 = bus_walk0·bus_path·bus_walk1)."""
+    return df.assign(commute_min=pd.concat([subway_min, mixed["min"]], axis=1).min(axis=1).round(),
+                     bus=(mixed["min"] < subway_min - 0.5).fillna(False),
+                     bus_walk0=mixed.walk0, bus_path=mixed.path, bus_walk1=mixed.walk1)
+
+
+def trip_of(r) -> tuple[float, list, float]:
+    """카드 통학 시간을 낸 경로 (출발 도보 분, 경로 노드, 도착 도보 분). 지하철만이면 그 동네 역 → 통학역 최단 경로."""
+    if r.get("bus"):
+        return r.bus_walk0, r.bus_path, r.bus_walk1
+    return r.get("walk_min", 0.0), subway.route(r.station, station), walk
+
+
+def route_html(r) -> str:
+    """카드를 누르면 펼쳐지는 가는 길: 도보 → 탄 구간들 → 도보."""
+    w0, path, w1 = trip_of(r)
+    rides = legs(path, getattr(transit, "route_name", {}), getattr(transit, "stop_name", {}))  # 예전 transit.pkl → ID
+    if not rides:  # 정류장·역을 거쳐 걷기만 하는 가까운 동네
+        w0, w1 = 0.0, w0 + w1
+    icon = lambda t: ("🚌 " if "버스" in t else "🚇 ") + esc(t)  # noqa: E731
+    steps = ([f"🚶 도보 {w0:.0f}분"] if w0 >= 1 else []) + [icon(t) for t in rides] +             ([f"🚶 도보 {w1:.0f}분 → {esc(place.strip())}"] if w1 >= 1 else [f"📍 {esc(place.strip())}"])
+    return '<div class="db-route">' + "".join(f"<div>{s}</div>" for s in steps) + "</div>"
+
+
+def node_xy(n):
+    """경로 노드 좌표: 버스 그래프에 있으면 거기서, 지하철 역은 역 좌표 파일에서."""
+    p = getattr(transit, "xy", {}).get(n)  # 예전 transit.pkl 은 xy 없음 → 지하철 역만 그려진다
+    return p if p is not None or n[0] not in coords.index else (float(coords.lat[n[0]]), float(coords.lon[n[0]]))
+
+
+def route_geo(r) -> list[dict]:
+    """지도에 그릴 가는 길: 동네 위치 → (도보) → 탄 구간들(호선색·버스색) → (도보) → 목적지. [{color, pts, dash, tip}]."""
+    _, path, _ = trip_of(r)
+    names = getattr(transit, "route_name", {})
+    segs = route_lines([("S", "@o"), *path, ("S", "@d")],
+                       lambda n: (r.lat, r.lon) if n == ("S", "@o") else (dest["lat"], dest["lon"]) if n == ("S", "@d") else node_xy(n))
+    out = []
+    for s in segs:
+        k = s["kind"]
+        if k == "W":
+            out.append({"color": "#222", "pts": s["pts"], "dash": True, "tip": "걷기"})
+        elif k[0] == "M":
+            out.append({"color": LINE_COLOR.get(k[1], "#555"), "pts": s["pts"], "dash": False, "tip": f"{k[1]}호선"})
+        else:
+            out.append({"color": BUS_COLOR, "pts": s["pts"], "dash": False, "tip": f"{names.get(k[1], k[1])}번 버스"})
+    return out
 
 
 def won(v: float) -> str:
@@ -314,16 +370,18 @@ def subway_map() -> dict:
             "subway_stations": m["stations"]}
 
 
-def map_data(points, dest, stations, note) -> str:
+def map_data(points, dest, stations, note, routes=None) -> str:
     # </script> 같은 문자열이 들어와도 스크립트 밖으로 못 나가게
-    return json.dumps({"points": points, "dest": dest, "stations": list(stations), "note": note, **subway_map()},
+    return json.dumps({"points": points, "dest": dest, "stations": list(stations), "note": note, "routes": routes or {},
+                       **subway_map()},
                       ensure_ascii=False).replace("</", "<\\/")
 
 
-def leaflet_map(points, dest, stations=(), note="", height=760):
-    """다방식 지도. points: dict(lat, lon, value, name, tip, state[top|on|off]) — 파란 원(value) + 흰 이름표(name).
+def leaflet_map(points, dest, stations=(), note="", height=760, routes=None):
+    """다방식 지도. points: dict(lat, lon, value, name, tip, state[top|on|off], key) — 파란 원(value) + 흰 이름표(name).
+    routes {key: route_geo}: 마커나 같은 key의 목록 카드(details.db-go data-k)를 누르면 그 가는 길을 그린다.
     배경은 OpenStreetMap 기본 지도(키 불필요, 한글 지명, 컬러). CARTO는 이제 키가 필요하고 Esri는 서울 데이터가 없어서 이걸 쓴다."""
-    data = map_data(points, dest, stations, note)
+    data = map_data(points, dest, stations, note, routes)
     components.html(f"""
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css"/>
@@ -334,8 +392,9 @@ const D={data};
 const map=L.map('m',{{zoomControl:false,scrollWheelZoom:true,minZoom:10,maxBounds:[[37.38,126.70],[37.75,127.27]],maxBoundsViscosity:1}});  // 서울만
 L.control.zoom({{position:'topright'}}).addTo(map);
 L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{attribution:'&copy; OpenStreetMap',maxZoom:19}}).addTo(map);
-for(const l of D.lines) L.polyline(l.segs,{{color:'#fff',weight:8,opacity:.9,interactive:false}}).addTo(map);  // 흰 테두리 먼저
-for(const l of D.lines) L.polyline(l.segs,{{color:l.color,weight:5,opacity:.95}}).bindTooltip(l.line+'호선',{{sticky:true}}).addTo(map);
+const base=[];  // 호선 선로 (경로를 그리면 흐리게)
+for(const l of D.lines) base.push(L.polyline(l.segs,{{color:'#fff',weight:8,opacity:.9,interactive:false}}).addTo(map));  // 흰 테두리 먼저
+for(const l of D.lines) base.push(L.polyline(l.segs,{{color:l.color,weight:5,opacity:.95}}).bindTooltip(l.line+'호선',{{sticky:true}}).addTo(map));
 const sl=L.layerGroup();  // 역 점 + 이름은 확대했을 때만 (네이버처럼, 다 펴면 글자가 겹친다)
 const busy=new Set([...D.stations.map(x=>x.name),D.dest&&D.dest.stn&&D.dest.stn.name]);  // 파란 이름표가 이미 있는 역
 for(const s of D.subway_stations){{
@@ -351,7 +410,7 @@ for(const s of D.stations){{
 for(const p of D.points){{
   const ic=L.divIcon({{className:'',iconSize:[260,44],iconAnchor:[22,22],html:`<div class="mk ${{p.state}}"><span class="c">${{p.value}}</span><span class="n">${{p.name}}</span></div>`}});
   L.marker([p.lat,p.lon],{{icon:ic,zIndexOffset:p.state==='top'?1000:p.state==='on'?500:0}})
-    .bindTooltip(p.tip,{{direction:'top',offset:[0,-24]}}).addTo(map);
+    .bindTooltip(p.tip,{{direction:'top',offset:[0,-24]}}).on('click',()=>showRoute(cur===p.key?null:p.key)).addTo(map);
   if(p.state!=='off') pts.push([p.lat,p.lon]);
 }}
 if(D.dest){{
@@ -369,6 +428,27 @@ if(D.dest){{
 }}
 if(pts.length) map.fitBounds(pts,{{padding:[60,60],maxZoom:14}}); else map.setView([37.56,126.99],11);
 showSl(); map.on('zoomend',showSl);  // 첫 화면이 잡힌 뒤에 건다 (그 전엔 렌더러가 없어 점 추가가 터진다)
+const rl=L.layerGroup().addTo(map); let cur=null;  // 고른 동네의 가는 길
+function showRoute(k){{
+  rl.clearLayers(); cur=k&&D.routes[k]?k:null;
+  base.forEach((b,i)=>b.setStyle({{opacity:cur?.2:i<D.lines.length?.9:.95}}));
+  if(!cur) return;
+  const b=[];
+  for(const s of D.routes[cur]){{
+    const dash=s.dash?'0.1 11':null;
+    L.polyline(s.pts,{{color:'#fff',weight:s.dash?10:12,dashArray:dash,lineCap:'round',interactive:false}}).addTo(rl);
+    L.polyline(s.pts,{{color:s.color,weight:s.dash?6:8,dashArray:dash,lineCap:'round'}}).bindTooltip(s.tip,{{sticky:true}}).addTo(rl);
+    b.push(...s.pts);
+  }}
+  if(b.length) map.fitBounds(b,{{padding:[60,60],maxZoom:15}});
+}}
+try{{  // 목록 카드(부모 문서)를 펼치면 그 동네 경로. 지도가 다시 그려지면 예전 리스너는 떼어 낸다
+  const P=window.parent;
+  if(P.__kkcRoute) P.document.removeEventListener('toggle',P.__kkcRoute,true);
+  P.__kkcRoute=e=>{{const d=e.target; if(!d.matches||!d.matches('details.db-go')) return;
+    if(d.open) showRoute(d.dataset.k); else if(cur===d.dataset.k) showRoute(null);}};
+  P.document.addEventListener('toggle',P.__kkcRoute,true);
+}}catch(e){{}}  // 부모 문서에 못 닿으면 마커 클릭으로만
 if(D.note) document.getElementById('note').innerHTML=D.note; else document.getElementById('note').remove();
 </script>""", height=height)
 
@@ -635,7 +715,7 @@ if page == "동네 찾기":
         with st.container(height=690, border=False):
             if not shown.empty:  # st.html("")은 오류라 빈 목록이면 건너뜀
                 st.html("".join(
-                f'<div class="db-it"><div class="db-sq">'
+                f'<details class="db-go" data-k="{esc(r.region)}"><summary><div class="db-it"><div class="db-sq">'
                 + (f'{r.rent_med:.0f}<small>만 원/월</small>' if r.rent_med else f'{won(r.deposit_med)}<small>전세금</small>')
                 + '</div><div>'
                 f'<div class="db-pr">{f"월세 {r.deposit_med:,.0f}/{r.rent_med:.0f}" if r.rent_med else "전세 " + won(r.deposit_med)}</div>'
@@ -645,7 +725,9 @@ if page == "동네 찾기":
                 f'<div class="db-l1">{room} · 통학 {r.commute_min:.0f}분{" (버스 포함)" if r.get("bus") else ""}'
                 f'{f" · 거래 {r.deals:,.0f}건" if "deals" in r else ""}</div>'
                 f'<div class="db-l2">편의점·마트·병원 {r.amenity_cnt:,.0f}곳</div>'
-                f'<span class="db-tg">추천 {r["rank"]}위</span></div></div>'
+                f'<span class="db-tg">추천 {r["rank"]}위</span>'
+                + ('<div class="db-more">눌러서 가는 길 보기 ▾</div></div></div></summary>' + route_html(r) if ready
+                   else '</div></div></summary>') + '</details>'
                 for _, r in shown.iterrows()))
     with col_map:
         if dest:
@@ -654,15 +736,18 @@ if page == "동네 찾기":
             pts = []
             for _, r in (ranked.head(DONG_SHOWN) if by_dong else regions).iterrows():
                 k = rank_of.get(r.region)
-                pts.append({"lat": r.lat, "lon": r.lon, "name": r.dong if by_dong else r.region,
+                pts.append({"lat": r.lat, "lon": r.lon, "name": r.dong if by_dong else r.region, "key": r.region,
                             "value": f"{r.rent_med:.0f}만" if r.rent_med else won(r.deposit_med),
                             "state": "off" if k is None else "top" if k < 3 else "on",
                             "tip": f"<b>{f'추천 {k + 1}위 ' if k is not None else '조건 밖 · '}{r.region}</b><br>{room} "
                                    f"{price_text(r)}<br>{'🚌 버스 포함' if r.get('bus') else '🚇'} {who}까지 {r.commute_min:.0f}분 "
                                    f"({r.station}역) · 거래 {r.deals:,.0f}건"})
-            leaflet_map(pts, dest, note="원 안의 숫자 = " + ("원룸 " if room == "원룸" else "투룸 ")
+            shown_rows = ranked.head(DONG_SHOWN) if by_dong else regions
+            leaflet_map(pts, dest, routes={r.region: route_geo(r) for _, r in shown_rows.iterrows()},
+                        note="원 안의 숫자 = " + ("원룸 " if room == "원룸" else "투룸 ")
                         + ("월세 중앙값" if kind == "월세" else "전세금 중앙값")
-                        + (f" · 추천 상위 {DONG_SHOWN}개 동" if by_dong else " · 회색 = 조건 밖") + " · 마커에 마우스를 올리면 자세히")
+                        + (f" · 추천 상위 {DONG_SHOWN}개 동" if by_dong else " · 회색 = 조건 밖")
+                        + " · 마커나 목록 카드를 누르면 가는 길")
         else:
             st.info("실제 데이터를 빌드하면 여기에 서울 지도가 보여요 (scripts/build_data.py).")
     with body, st.container(key="foot"):

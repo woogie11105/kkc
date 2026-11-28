@@ -49,6 +49,7 @@ class TransitGraph:
             self.adj[u].extend(nbrs)
         rows = [(n, coords.lat[n[0]], coords.lon[n[0]]) for n in list(subway.adj) if n[0] in coords.index]
         self.points = pd.DataFrame(rows, columns=["node", "lat", "lon"])  # 걸어서 타고 내릴 수 있는 곳 (역·정류장)
+        self.xy = {n: (float(la), float(lo)) for n, la, lo in rows}  # 노드 → (lat, lon), 지도에 경로를 그릴 때
 
     def add_bus(self, stops: pd.DataFrame, ride_min: dict, wait_min: dict, default_wait: float = 8.0) -> None:
         """stops: route, seq, stop, lat, lon (노선별 정류장 순서). ride_min[(노선, 순번)] = 다음 순번까지 분 (없으면 거리로),
@@ -57,12 +58,16 @@ class TransitGraph:
             prev = None
             for r in g.itertuples(index=False):
                 ride, stop = ("R", route, r.seq), ("S", r.stop)
+                self.xy[ride] = self.xy[stop] = (float(r.lat), float(r.lon))
                 self.adj[stop].append((ride, wait_min.get((route, r.stop), default_wait)))
                 self.adj[ride].append((stop, 0.0))
                 if prev is not None:
                     km = _km(prev.lat, prev.lon, r.lat, r.lon)
                     self.adj[("R", route, prev.seq)].append((ride, ride_min.get((route, prev.seq), km / 15 * 60)))
                 prev = r
+        if "route_name" in stops:  # 경로 안내용 이름 (없으면 legs 가 ID로 보여 준다)
+            self.route_name = {**getattr(self, "route_name", {}), **dict(zip(stops.route, stops.route_name))}
+            self.stop_name = {**getattr(self, "stop_name", {}), **dict(zip(stops.stop, stops.stop_name))}
         new = stops.drop_duplicates("stop")
         self.points = pd.concat([self.points, pd.DataFrame(
             {"node": [("S", s) for s in new.stop], "lat": new.lat.values, "lon": new.lon.values})], ignore_index=True)
@@ -99,31 +104,45 @@ class TransitGraph:
         pick = mins[ok] if ok.any() else mins.nsmallest(1)
         return {near.node[i]: float(pick[i]) for i in pick.index}
 
-    def times_to(self, egress: dict) -> dict:
-        """egress {노드: 목적지까지 도보 분} → 모든 노드에서 목적지까지 최소 분 (역방향 다익스트라)."""
+    def times_to(self, egress: dict, nxt: dict | None = None) -> dict:
+        """egress {노드: 목적지까지 도보 분} → 모든 노드에서 목적지까지 최소 분 (역방향 다익스트라).
+        nxt 를 주면 {노드: 목적지 쪽 다음 노드}를 채운다 (경로 복원용, egress 노드는 없음)."""
         if not hasattr(self, "_radj"):
             self._radj = defaultdict(list)
             for u, nbrs in self.adj.items():
                 for v, w in nbrs:
                     self._radj[v].append((u, w))
         dist: dict = {}
-        pq = [(w, n) for n, w in egress.items()]
+        pq = [(w, i, n, None) for i, (n, w) in enumerate(egress.items())]
         heapq.heapify(pq)
+        i = len(pq)  # 같은 시간일 때 노드끼리 비교하지 않게 하는 순번
         while pq:
-            d, u = heapq.heappop(pq)
+            d, _, u, p = heapq.heappop(pq)
             if u in dist:
                 continue
             dist[u] = d
+            if nxt is not None and p is not None:
+                nxt[u] = p
             for v, w in self._radj[u]:
                 if v not in dist:
-                    heapq.heappush(pq, (d + w, v))
+                    i += 1
+                    heapq.heappush(pq, (d + w, i, v, u))
         return dist
 
     def time_from(self, lat: float, lon: float, to: dict, extra: dict | None = None) -> float:
         """(lat, lon)에서 출발해 목적지까지 분 = min(걸어서 닿는 역·정류장까지 도보 + 거기서 목적지까지). extra로 출발점을 더 줄 수 있다."""
+        return self.trip(lat, lon, to, extra)[0]
+
+    def trip(self, lat: float, lon: float, to: dict, extra: dict | None = None, nxt: dict | None = None):
+        """time_from 과 같은 계산 → (분, 출발 도보 분, 경로 노드). 경로는 nxt(times_to 가 채운 것)를 줄 때만."""
         acc = {**self.access(lat, lon), **(extra or {})}
-        best = min((w + to[n] for n, w in acc.items() if n in to), default=float("nan"))
-        return float(best)
+        start = min((n for n in acc if n in to), key=lambda n: acc[n] + to[n], default=None)
+        if start is None:
+            return float("nan"), float("nan"), []
+        path = [start]
+        while nxt is not None and path[-1] in nxt:
+            path.append(nxt[path[-1]])
+        return float(acc[start] + to[start]), float(acc[start]), path if nxt is not None else []
 
     def __getstate__(self):
         return {k: v for k, v in self.__dict__.items() if k != "_radj"}  # 역방향 인접 목록은 불러온 뒤 다시 만든다
@@ -132,7 +151,8 @@ class TransitGraph:
 def load_bus(route_xlsx, speed_csv, turn_csv, weekdays=None) -> tuple[pd.DataFrame, dict, dict]:
     """세 파일 → (stops, ride_min, wait_min). 평일 7~8시 평균. weekdays: 쓸 기준_날짜 목록 (없으면 토·일 뺀 전부)."""
     rs = pd.read_excel(route_xlsx)
-    stops = pd.DataFrame({"route": rs.ROUTE_ID, "seq": rs["순번"], "stop": rs.NODE_ID, "lat": rs["Y좌표"], "lon": rs["X좌표"]})
+    stops = pd.DataFrame({"route": rs.ROUTE_ID, "seq": rs["순번"], "stop": rs.NODE_ID, "lat": rs["Y좌표"], "lon": rs["X좌표"],
+                          "route_name": rs["노선명"].astype(str), "stop_name": rs["정류소명"].astype(str)})
     stops = stops.dropna().query("lat > 37 and lon > 126")  # 좌표 0 같은 깨진 행 제외
 
     def rush(df, prefix):
@@ -153,3 +173,44 @@ def load_bus(route_xlsx, speed_csv, turn_csv, weekdays=None) -> tuple[pd.DataFra
     per_hour = rush(hr, "버스운행횟수").groupby(["노선_ID", "정류장_ID"]).v.mean().dropna()
     wait_min = {k: wait_minutes(n) for k, n in per_hour.items()}
     return stops, ride_min, wait_min
+
+
+def ride(n):
+    """같은 차를 계속 타는지 가르는 키: 지하철 (역, 호선) → ("M", 호선), 버스 ("R", 노선, 순번) → ("R", 노선), 정류장 → None."""
+    return ("R", n[1]) if n[0] == "R" else None if n[0] == "S" else ("M", n[1])
+
+
+def route_lines(path: list, xy) -> list[dict]:
+    """경로 노드 → 지도에 그릴 구간 [{"kind": ("M", 호선) | ("R", 노선) | "W"(걷기·환승), "pts": [[lat, lon], ...]}].
+    xy(노드) → (lat, lon) 또는 None(좌표 없는 노드는 건너뜀). 길이 0인 구간(제자리 환승·승하차)은 뺀다."""
+    out = []
+    for a, b in zip(path, path[1:]):
+        pa, pb = xy(a), xy(b)
+        if pa is None or pb is None or tuple(pa) == tuple(pb):
+            continue
+        kind = ride(a) if ride(a) is not None and ride(a) == ride(b) else "W"
+        if out and out[-1]["kind"] == kind and out[-1]["pts"][-1] == list(pa):
+            out[-1]["pts"].append(list(pb))
+        else:
+            out.append({"kind": kind, "pts": [list(pa), list(pb)]})
+    return out
+
+
+def legs(path: list, route_name: dict | None = None, stop_name: dict | None = None) -> list[str]:
+    """경로 노드 → 탄 구간 ['1호선 회기 → 청량리 (1정거장)', '273번 버스 경희의료원 → 청량리역 (5정거장)'].
+    걷는 환승은 따로 적지 않는다. 출발·도착역에서만 갈아타는(정거장 0) 구간은 뺀다."""
+    route_name, stop_name = route_name or {}, stop_name or {}
+    out, i = [], 0
+    while i < len(path):
+        k = ride(path[i])
+        j = i
+        while j + 1 < len(path) and k is not None and ride(path[j + 1]) == k:
+            j += 1
+        if k is not None and k[0] == "M" and j > i:
+            out.append(f"{k[1]}호선 {path[i][0]} → {path[j][0]} ({j - i}정거장)")
+        elif k is not None and k[0] == "R" and path[j][2] > path[i][2]:
+            stop = lambda n: stop_name.get(n[1], str(n[1])) if n and n[0] == "S" else "?"  # noqa: E731 탈 때·내릴 때 정류장
+            out.append(f"{route_name.get(k[1], k[1])}번 버스 {stop(path[i - 1] if i else None)} → "
+                       f"{stop(path[j + 1] if j + 1 < len(path) else None)} ({path[j][2] - path[i][2]}정거장)")
+        i = j + 1
+    return out

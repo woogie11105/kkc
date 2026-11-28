@@ -126,6 +126,28 @@ class SubwayGraph:
             best[name] = min(d, best.get(name, float("inf")))
         return best
 
+    def route(self, a: str, b: str) -> list[Node]:
+        """a역 → b역 최단 경로 노드 [(역, 호선), ...]. 못 가면 []."""
+        prev: dict[Node, Node | None] = {}
+        pq = [(0.0, i, n, None) for i, n in enumerate(self.nodes_of(a))]
+        heapq.heapify(pq)
+        i = len(pq)  # 같은 시간일 때 노드끼리 비교하지 않게 하는 순번
+        while pq:
+            d, _, u, p = heapq.heappop(pq)
+            if u in prev:
+                continue
+            prev[u] = p
+            if u[0] == b:
+                path = [u]
+                while prev[path[-1]] is not None:
+                    path.append(prev[path[-1]])
+                return path[::-1]
+            for v, w in self.adj[u]:
+                if v not in prev:
+                    i += 1
+                    heapq.heappush(pq, (d + w, i, v, u))
+        return []
+
 
 
 SEOUL_BBOX = (37.38, 126.70, 37.75, 127.27)  # 남, 서, 북, 동 — 앱 지도가 보여 주는 범위
